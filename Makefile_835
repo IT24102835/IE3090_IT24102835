@@ -1,0 +1,13 @@
+CC=gcc
+CFLAGS=-Wall -g -pthread
+
+all: agent_835 controller_835
+
+agent_835: agent_835.c
+	$(CC) $(CFLAGS) -o agent_835 agent_835.c
+
+controller_835: controller_835.c
+	$(CC) $(CFLAGS) -o controller_835 controller_835.c
+
+clean:
+	rm -f agent_835 controller_835
