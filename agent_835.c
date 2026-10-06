@@ -16,13 +16,38 @@ void *handle_client(void *client_socket) {
 
     char buffer[1024];
     int bytes_read;
+    int authenticated = 0; // State variable to track authentication
 
     printf("Thread started for new connection.\n");
 
     while ((bytes_read = recv(sock, buffer, sizeof(buffer) - 1, 0)) > 0) {
         buffer[bytes_read] = '\0'; 
-        buffer[strcspn(buffer, "\r\n")] = 0; 
+        buffer[strcspn(buffer, "\r\n")] = 0; // Strip newline characters
         printf("Received command: %s\n", buffer);
+
+        char response[1024] = {0};
+
+        // 1. Check if the command starts with "AUTH "
+        if (strncmp(buffer, "AUTH ", 5) == 0) {
+            char *token = buffer + 5; // Extract everything after "AUTH "
+            if (strcmp(token, AUTH_TOKEN) == 0) {
+                authenticated = 1;
+                strcpy(response, "200 OK: Authenticated successfully.");
+            } else {
+                strcpy(response, "401 Error: Invalid token.");
+            }
+        } 
+        // 2. Enforce authentication for all other commands
+        else if (!authenticated) {
+            strcpy(response, "401 Error: Not authenticated. Please run AUTH first.");
+        }
+        // 3. Placeholder for future commands (SYSINFO, EXEC, etc.)
+        else {
+            strcpy(response, "200 OK: Command received but not yet implemented.");
+        }
+
+        // Send the response back to the Controller
+        send(sock, response, strlen(response), 0);
     }
 
     if (bytes_read == 0) {
