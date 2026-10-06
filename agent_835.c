@@ -5,7 +5,7 @@
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <pthread.h>
-#include <sys/utsname.h> 
+#include <sys/sysinfo.h> // NEW: For RAM and Uptime calculations
 
 #define PORT 9410
 #define SID_TAG "SID:5382"
@@ -17,68 +17,78 @@ void *handle_client(void *client_socket) {
 
     char buffer[1024];
     int bytes_read;
-    int authenticated = 0; // State variable to track authentication
+    int authenticated = 0; 
 
     printf("Thread started for new connection.\n");
 
     while ((bytes_read = recv(sock, buffer, sizeof(buffer) - 1, 0)) > 0) {
         buffer[bytes_read] = '\0'; 
-        buffer[strcspn(buffer, "\r\n")] = 0; // Strip newline characters
+        buffer[strcspn(buffer, "\r\n")] = 0; 
         printf("Received command: %s\n", buffer);
 
-        char response[1024] = {0};
+        char response[2048] = {0}; // Increased size for command outputs
 
-        // 1. Check Authentication
+        // 1. AUTH Check
         if (strncmp(buffer, "AUTH ", 5) == 0) {
             char *token = buffer + 5; 
             if (strcmp(token, AUTH_TOKEN) == 0) {
                 authenticated = 1;
-                strcpy(response, "200 OK: Authenticated successfully.");
+                sprintf(response, "OK AUTHENTICATED %s", SID_TAG);
             } else {
-                strcpy(response, "401 Error: Invalid token.");
+                sprintf(response, "ERR 001 AUTH_FAILED %s", SID_TAG);
             }
         } 
-        // 2. Enforce authentication for all other commands
+        // Enforce authentication
         else if (!authenticated) {
-            strcpy(response, "401 Error: Not authenticated. Please run AUTH first.");
+            sprintf(response, "ERR 001 AUTH_FAILED %s", SID_TAG);
         }
-        // 3. SYSINFO Command
+        // 2. SYSINFO Command
         else if (strcmp(buffer, "SYSINFO") == 0) {
-            struct utsname sys_info;
-            if (uname(&sys_info) == 0) {
-                snprintf(response, sizeof(response), "200 OK: OS: %s, Release: %s, Machine: %s", 
-                         sys_info.sysname, sys_info.release, sys_info.machine);
+            struct sysinfo info;
+            double load[1];
+            if (sysinfo(&info) == 0 && getloadavg(load, 1) != -1) {
+                unsigned long mem_used_mb = ((info.totalram - info.freeram) * info.mem_unit) / (1024 * 1024);
+                sprintf(response, "OK SYSINFO %.2f %lu %ld %s", load[0], mem_used_mb, info.uptime, SID_TAG);
             } else {
-                strcpy(response, "500 Error: Could not retrieve system info.");
+                sprintf(response, "ERR 500 INTERNAL_ERROR %s", SID_TAG);
             }
         }
-        // 4. EXEC Command
+        // 3. EXEC Command (Whitelisted)
         else if (strncmp(buffer, "EXEC ", 5) == 0) {
-            char *cmd = buffer + 5; // Extract the command after "EXEC "
-            FILE *fp = popen(cmd, "r");
-            
-            if (fp == NULL) {
-                strcpy(response, "500 Error: Failed to execute command.");
+            char *name = buffer + 5; 
+            char cmd[256] = {0};
+
+            // Map the whitelisted keywords to actual Linux commands
+            if (strcmp(name, "DATE") == 0) strcpy(cmd, "date");
+            else if (strcmp(name, "UPTIME") == 0) strcpy(cmd, "uptime");
+            else if (strcmp(name, "DISKFREE") == 0) strcpy(cmd, "df -h");
+            else if (strcmp(name, "HOSTNAME") == 0) strcpy(cmd, "hostname");
+            else if (strcmp(name, "WHOAMI") == 0) strcpy(cmd, "whoami");
+
+            if (cmd[0] == '\0') {
+                // Command was not in the whitelist
+                sprintf(response, "ERR 002 COMMAND_NOT_ALLOWED %s", SID_TAG);
             } else {
-                char line[256];
-                strcpy(response, "200 OK:\n"); // Start with success message
-                
-                // Read the output line by line
-                while (fgets(line, sizeof(line), fp) != NULL) {
-                    // Prevent buffer overflow (leave room for null terminator)
-                    if (strlen(response) + strlen(line) < sizeof(response) - 1) {
-                        strcat(response, line);
+                FILE *fp = popen(cmd, "r");
+                if (fp != NULL) {
+                    char output[1024] = {0};
+                    char line[256];
+                    while (fgets(line, sizeof(line), fp) != NULL) {
+                        if (strlen(output) + strlen(line) < sizeof(output) - 1) {
+                            strcat(output, line);
+                        }
                     }
+                    pclose(fp);
+                    sprintf(response, "OK EXEC_RESULT\n%s%s", output, SID_TAG);
+                } else {
+                    sprintf(response, "ERR 500 EXEC_FAILED %s", SID_TAG);
                 }
-                pclose(fp);
             }
         }
-        // 5. Placeholder for future commands (PUT/GET, etc.)
         else {
-            strcpy(response, "200 OK: Command received but not yet implemented.");
+            sprintf(response, "ERR 404 UNKNOWN_COMMAND %s", SID_TAG);
         }
 
-        // Send the response back to the Controller
         send(sock, response, strlen(response), 0);
     }
 
@@ -97,13 +107,11 @@ int main() {
     struct sockaddr_in address;
     int addrlen = sizeof(address);
 
-    // Create socket file descriptor
     if ((server_fd = socket(AF_INET, SOCK_STREAM, 0)) == 0) {
         perror("Socket creation failed");
         exit(EXIT_FAILURE);
     }
 
-    // Attach socket to the port and reuse address
     int opt = 1;
     setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
@@ -111,14 +119,12 @@ int main() {
     address.sin_addr.s_addr = INADDR_ANY;
     address.sin_port = htons(PORT);
 
-    // Bind the socket to the network address and port
     if (bind(server_fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
         perror("Bind failed");
         close(server_fd);
         exit(EXIT_FAILURE);
     }
 
-    // Start listening for incoming connections
     if (listen(server_fd, 5) < 0) {
         perror("Listen failed");
         close(server_fd);
@@ -127,27 +133,22 @@ int main() {
 
     printf("Agent started. Listening on port %d...\n", PORT);
 
-    // Accept incoming connections in a loop
     while (1) {
         if ((new_socket = accept(server_fd, (struct sockaddr *)&address, (socklen_t*)&addrlen)) < 0) {
             perror("Accept failed");
             continue;
         }
 
-        // Allocate memory for the socket to pass safely to the thread
         int *new_sock = malloc(sizeof(int));
         *new_sock = new_socket;
         pthread_t thread_id;
         
-        // Create a new thread for the connected client
         if (pthread_create(&thread_id, NULL, handle_client, (void*)new_sock) < 0) {
             perror("Could not create thread");
             free(new_sock);
             close(new_socket);
             continue;
         }
-        
-        // Detach the thread so its resources are freed when it finishes
         pthread_detach(thread_id);
     }
 
