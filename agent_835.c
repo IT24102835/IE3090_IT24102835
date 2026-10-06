@@ -5,6 +5,7 @@
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <pthread.h>
+#include <sys/utsname.h> // NEW: Required for retrieving kernel/system info
 
 #define PORT 9410
 #define SID_TAG "SID:5382"
@@ -27,9 +28,9 @@ void *handle_client(void *client_socket) {
 
         char response[1024] = {0};
 
-        // 1. Check if the command starts with "AUTH "
+        // 1. Check Authentication
         if (strncmp(buffer, "AUTH ", 5) == 0) {
-            char *token = buffer + 5; // Extract everything after "AUTH "
+            char *token = buffer + 5; 
             if (strcmp(token, AUTH_TOKEN) == 0) {
                 authenticated = 1;
                 strcpy(response, "200 OK: Authenticated successfully.");
@@ -41,7 +42,17 @@ void *handle_client(void *client_socket) {
         else if (!authenticated) {
             strcpy(response, "401 Error: Not authenticated. Please run AUTH first.");
         }
-        // 3. Placeholder for future commands (SYSINFO, EXEC, etc.)
+        // 3. SYSINFO Command
+        else if (strcmp(buffer, "SYSINFO") == 0) {
+            struct utsname sys_info;
+            if (uname(&sys_info) == 0) {
+                snprintf(response, sizeof(response), "200 OK: OS: %s, Release: %s, Machine: %s", 
+                         sys_info.sysname, sys_info.release, sys_info.machine);
+            } else {
+                strcpy(response, "500 Error: Could not retrieve system info.");
+            }
+        }
+        // 4. Placeholder for future commands (EXEC, PUT/GET, etc.)
         else {
             strcpy(response, "200 OK: Command received but not yet implemented.");
         }
