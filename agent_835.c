@@ -13,6 +13,49 @@
 #define AUTH_TOKEN "OPS-2835"
 #define STORAGE_DIR "storage_5382"
 
+typedef struct {
+    char ip[INET_ADDRSTRLEN];
+    int udp_port;
+    volatile int *active_flag;
+} monitor_args_t;
+
+void *udp_monitor_thread(void *args) {
+    monitor_args_t *m_args = (monitor_args_t *)args;
+    int sockfd;
+    struct sockaddr_in dest_addr;
+
+    if ((sockfd = socket(AF_INET, SOCK_DGRAM, 0)) < 0) {
+        free(m_args);
+        return NULL;
+    }
+
+    memset(&dest_addr, 0, sizeof(dest_addr));
+    dest_addr.sin_family = AF_INET;
+    dest_addr.sin_port = htons(m_args->udp_port);
+    inet_pton(AF_INET, m_args->ip, &dest_addr.sin_addr);
+
+    while (*(m_args->active_flag)) {
+        struct sysinfo info;
+        double load[1];
+        char payload[256];
+        
+        if (sysinfo(&info) == 0 && getloadavg(load, 1) != -1) {
+            unsigned long mem_used_mb = ((info.totalram - info.freeram) * info.mem_unit) / (1024 * 1024);
+            snprintf(payload, sizeof(payload), "OK SYSINFO %.2f %lu %ld %s", 
+                     load[0], mem_used_mb, info.uptime, SID_TAG);
+            sendto(sockfd, payload, strlen(payload), 0, (struct sockaddr *)&dest_addr, sizeof(dest_addr));
+        }
+        
+        for(int i = 0; i < 20 && *(m_args->active_flag); i++) {
+            usleep(100000); 
+        }
+    }
+
+    close(sockfd);
+    free(m_args);
+    return NULL;
+}
+
 void *handle_client(void *client_socket) {
     int sock = *(int*)client_socket;
     free(client_socket);
@@ -20,6 +63,10 @@ void *handle_client(void *client_socket) {
     char buffer[2048];
     int bytes_read;
     int authenticated = 0; 
+    
+    volatile int monitor_active = 0;
+    pthread_t monitor_tid = 0;
+    int monitor_running = 0;
 
     mkdir(STORAGE_DIR, 0777);
     printf("Thread started for new connection.\n");
@@ -71,9 +118,8 @@ void *handle_client(void *client_socket) {
             else if (strcmp(name, "HOSTNAME") == 0) strcpy(cmd, "hostname");
             else if (strcmp(name, "WHOAMI") == 0) strcpy(cmd, "whoami");
 
-            if (cmd[0] == '\0') {
-                sprintf(response, "ERR 002 COMMAND_NOT_ALLOWED %s", SID_TAG);
-            } else {
+            if (cmd[0] == '\0') sprintf(response, "ERR 002 COMMAND_NOT_ALLOWED %s", SID_TAG);
+            else {
                 FILE *fp = popen(cmd, "r");
                 if (fp != NULL) {
                     char output[1024] = {0};
@@ -83,16 +129,13 @@ void *handle_client(void *client_socket) {
                     }
                     pclose(fp);
                     sprintf(response, "OK EXEC_RESULT\n%s%s", output, SID_TAG);
-                } else {
-                    sprintf(response, "ERR 500 EXEC_FAILED %s", SID_TAG);
-                }
+                } else sprintf(response, "ERR 500 EXEC_FAILED %s", SID_TAG);
             }
         }
         else if (strcmp(buffer, "LISTPROC") == 0) {
             FILE *fp = popen("ps -e -o pid=,comm= | head -n 30", "r");
-            if (fp == NULL) {
-                sprintf(response, "ERR 500 PROCESS_ERROR %s", SID_TAG);
-            } else {
+            if (fp == NULL) sprintf(response, "ERR 500 PROCESS_ERROR %s", SID_TAG);
+            else {
                 char procs[1500] = {0}; 
                 char line[256];
                 int first = 1;
@@ -114,15 +157,13 @@ void *handle_client(void *client_socket) {
             char filename[256];
             int filesize;
             if (sscanf(buffer + 4, "%255s %d", filename, &filesize) == 2) {
-                if (filesize > 52428800) { 
-                    sprintf(response, "ERR 004 FILE_TOO_LARGE %s", SID_TAG);
-                } else {
+                if (filesize > 52428800) sprintf(response, "ERR 004 FILE_TOO_LARGE %s", SID_TAG);
+                else {
                     char filepath[512];
                     snprintf(filepath, sizeof(filepath), "%s/%s", STORAGE_DIR, filename);
                     FILE *fp = fopen(filepath, "wb");
-                    if (fp == NULL) {
-                        sprintf(response, "ERR 500 CANNOT_CREATE_FILE %s", SID_TAG);
-                    } else {
+                    if (fp == NULL) sprintf(response, "ERR 500 CANNOT_CREATE_FILE %s", SID_TAG);
+                    else {
                         int remaining = filesize;
                         int piggybacked = original_bytes_read - payload_offset;
                         if (piggybacked > 0) {
@@ -143,44 +184,76 @@ void *handle_client(void *client_socket) {
                         else sprintf(response, "ERR 500 TRANSFER_FAILED %s", SID_TAG);
                     }
                 }
-            } else {
-                sprintf(response, "ERR 400 INVALID_PUT_FORMAT %s", SID_TAG);
-            }
+            } else sprintf(response, "ERR 400 INVALID_PUT_FORMAT %s", SID_TAG);
         }
-        // 6. GET Command (File Download)
         else if (strncmp(buffer, "GET ", 4) == 0) {
             char filename[256];
             if (sscanf(buffer + 4, "%255s", filename) == 1) {
                 char filepath[512];
                 snprintf(filepath, sizeof(filepath), "%s/%s", STORAGE_DIR, filename);
-                
                 FILE *fp = fopen(filepath, "rb");
-                if (fp == NULL) {
-                    sprintf(response, "ERR 005 FILE_NOT_FOUND %s", SID_TAG);
-                } else {
+                if (fp == NULL) sprintf(response, "ERR 005 FILE_NOT_FOUND %s", SID_TAG);
+                else {
                     fseek(fp, 0L, SEEK_END);
                     long filesize = ftell(fp);
                     rewind(fp);
-                    
-                    // Send Header
                     char header[512];
                     snprintf(header, sizeof(header), "OK FILE_SEND %s %ld %s\r\n", filename, filesize, SID_TAG);
                     send(sock, header, strlen(header), 0);
-                    
-                    // Send File Data
                     char file_buf[4096];
                     size_t bytes_read;
                     while ((bytes_read = fread(file_buf, 1, sizeof(file_buf), fp)) > 0) {
                         send(sock, file_buf, bytes_read, 0);
                     }
                     fclose(fp);
-                    
-                    // Skip the default text send() at the bottom of the loop since we streamed binary data
                     continue; 
                 }
-            } else {
-                sprintf(response, "ERR 400 INVALID_GET_FORMAT %s", SID_TAG);
+            } else sprintf(response, "ERR 400 INVALID_GET_FORMAT %s", SID_TAG);
+        }
+        else if (strncmp(buffer, "MONITOR START ", 14) == 0) {
+            int udp_port;
+            if (sscanf(buffer + 14, "%d", &udp_port) == 1) {
+                if (!monitor_active) {
+                    struct sockaddr_in peer_addr;
+                    socklen_t peer_len = sizeof(peer_addr);
+                    getpeername(sock, (struct sockaddr*)&peer_addr, &peer_len); 
+                    
+                    monitor_args_t *m_args = malloc(sizeof(monitor_args_t));
+                    inet_ntop(AF_INET, &peer_addr.sin_addr, m_args->ip, INET_ADDRSTRLEN);
+                    m_args->udp_port = udp_port;
+                    m_args->active_flag = &monitor_active;
+                    
+                    monitor_active = 1;
+                    if (pthread_create(&monitor_tid, NULL, udp_monitor_thread, (void*)m_args) == 0) {
+                        monitor_running = 1;
+                        sprintf(response, "OK MONITOR_STARTED %s", SID_TAG);
+                    } else {
+                        monitor_active = 0;
+                        free(m_args);
+                        sprintf(response, "ERR 500 THREAD_ERROR %s", SID_TAG);
+                    }
+                } else sprintf(response, "ERR 400 ALREADY_MONITORING %s", SID_TAG);
+            } else sprintf(response, "ERR 400 INVALID_PORT %s", SID_TAG);
+        }
+        else if (strcmp(buffer, "MONITOR STOP") == 0) {
+            if (monitor_active) {
+                monitor_active = 0;
+                pthread_join(monitor_tid, NULL); 
+                monitor_running = 0;
+                sprintf(response, "OK MONITOR_STOPPED %s", SID_TAG);
+            } else sprintf(response, "ERR 400 NOT_MONITORING %s", SID_TAG);
+        }
+        // 9. QUIT Command
+        else if (strcmp(buffer, "QUIT") == 0) {
+            if (monitor_running) {
+                monitor_active = 0;
+                pthread_join(monitor_tid, NULL);
+                monitor_running = 0;
             }
+            sprintf(response, "OK BYE %s", SID_TAG);
+            send(sock, response, strlen(response), 0);
+	    printf("Controller disconnected gracefully.\n");
+            break; // Exit the loop and close the connection
         }
         else {
             sprintf(response, "ERR 404 UNKNOWN_COMMAND %s", SID_TAG);
@@ -189,8 +262,13 @@ void *handle_client(void *client_socket) {
         send(sock, response, strlen(response), 0);
     }
 
+    if (monitor_running) {
+        monitor_active = 0;
+        pthread_join(monitor_tid, NULL);
+    }
+
     if (bytes_read == 0) printf("Controller disconnected gracefully.\n");
-    else perror("recv failed");
+    else if (bytes_read < 0) perror("recv failed");
 
     close(sock);
     return NULL;
