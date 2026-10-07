@@ -6,12 +6,25 @@
 #include <sys/socket.h>
 #include <pthread.h>
 #include <sys/sysinfo.h>
-#include <sys/stat.h> 
+#include <sys/stat.h>
+#include <time.h> 
 
 #define PORT 9410
 #define SID_TAG "SID:5382"
 #define AUTH_TOKEN "OPS-2835"
-#define STORAGE_DIR "storage_5382"
+#define STORAGE_DIR "./agentfiles/IT24102835" 
+#define LOG_FILE "remoteops_IT24102835.log"   
+
+void log_event(const char *message) {
+    FILE *fp = fopen(LOG_FILE, "a");
+    if (fp != NULL) {
+        time_t now = time(NULL);
+        char *dt = ctime(&now);
+        dt[strlen(dt)-1] = '\0'; 
+        fprintf(fp, "[%s] %s\n", dt, message);
+        fclose(fp);
+    }
+}
 
 typedef struct {
     char ip[INET_ADDRSTRLEN];
@@ -46,9 +59,7 @@ void *udp_monitor_thread(void *args) {
             sendto(sockfd, payload, strlen(payload), 0, (struct sockaddr *)&dest_addr, sizeof(dest_addr));
         }
         
-        for(int i = 0; i < 20 && *(m_args->active_flag); i++) {
-            usleep(100000); 
-        }
+        for(int i = 0; i < 20 && *(m_args->active_flag); i++) usleep(100000); 
     }
 
     close(sockfd);
@@ -68,21 +79,31 @@ void *handle_client(void *client_socket) {
     pthread_t monitor_tid = 0;
     int monitor_running = 0;
 
+    mkdir("./agentfiles", 0777);
     mkdir(STORAGE_DIR, 0777);
+    
     printf("Thread started for new connection.\n");
+    log_event("New client connected.");
 
     while ((bytes_read = recv(sock, buffer, sizeof(buffer) - 1, 0)) > 0) {
         int original_bytes_read = bytes_read;
         buffer[bytes_read] = '\0'; 
         
         int cmd_len = strcspn(buffer, "\r\n");
-        buffer[cmd_len] = '\0'; 
         
+        // FIXED: Calculate the exact byte offset before truncating the string!
         int payload_offset = cmd_len;
-        if (payload_offset < original_bytes_read && buffer[payload_offset] == '\r') payload_offset++;
-        if (payload_offset < original_bytes_read && buffer[payload_offset] == '\n') payload_offset++;
+        if (buffer[payload_offset] == '\r') payload_offset++;
+        if (buffer[payload_offset] == '\n') payload_offset++;
+        
+        buffer[cmd_len] = '\0'; 
 
-        if (strlen(buffer) > 0) printf("Received command: %s\n", buffer);
+        if (strlen(buffer) > 0) {
+            printf("Received command: %s\n", buffer);
+            char log_msg[2100]; 
+            snprintf(log_msg, sizeof(log_msg), "Received command: %s", buffer);
+            log_event(log_msg);
+        }
 
         char response[2048] = {0}; 
 
@@ -91,8 +112,10 @@ void *handle_client(void *client_socket) {
             if (strcmp(token, AUTH_TOKEN) == 0) {
                 authenticated = 1;
                 sprintf(response, "OK AUTHENTICATED %s", SID_TAG);
+                log_event("Authentication successful.");
             } else {
                 sprintf(response, "ERR 001 AUTH_FAILED %s", SID_TAG);
+                log_event("Authentication failed.");
             }
         } 
         else if (!authenticated) {
@@ -104,9 +127,7 @@ void *handle_client(void *client_socket) {
             if (sysinfo(&info) == 0 && getloadavg(load, 1) != -1) {
                 unsigned long mem_used_mb = ((info.totalram - info.freeram) * info.mem_unit) / (1024 * 1024);
                 sprintf(response, "OK SYSINFO %.2f %lu %ld %s", load[0], mem_used_mb, info.uptime, SID_TAG);
-            } else {
-                sprintf(response, "ERR 500 INTERNAL_ERROR %s", SID_TAG);
-            }
+            } else sprintf(response, "ERR 500 INTERNAL_ERROR %s", SID_TAG);
         }
         else if (strncmp(buffer, "EXEC ", 5) == 0) {
             char *name = buffer + 5; 
@@ -180,8 +201,12 @@ void *handle_client(void *client_socket) {
                             remaining -= received;
                         }
                         fclose(fp);
-                        if (remaining == 0) sprintf(response, "OK FILE_RECEIVED %s %s", filename, SID_TAG);
-                        else sprintf(response, "ERR 500 TRANSFER_FAILED %s", SID_TAG);
+                        if (remaining == 0) {
+                            sprintf(response, "OK FILE_RECEIVED %s %s", filename, SID_TAG);
+                            char log_msg[512]; 
+                            snprintf(log_msg, sizeof(log_msg), "File uploaded: %s", filename);
+                            log_event(log_msg);
+                        } else sprintf(response, "ERR 500 TRANSFER_FAILED %s", SID_TAG);
                     }
                 }
             } else sprintf(response, "ERR 400 INVALID_PUT_FORMAT %s", SID_TAG);
@@ -206,6 +231,10 @@ void *handle_client(void *client_socket) {
                         send(sock, file_buf, bytes_read, 0);
                     }
                     fclose(fp);
+                    
+                    char log_msg[512]; 
+                    snprintf(log_msg, sizeof(log_msg), "File downloaded: %s", filename);
+                    log_event(log_msg);
                     continue; 
                 }
             } else sprintf(response, "ERR 400 INVALID_GET_FORMAT %s", SID_TAG);
@@ -243,7 +272,6 @@ void *handle_client(void *client_socket) {
                 sprintf(response, "OK MONITOR_STOPPED %s", SID_TAG);
             } else sprintf(response, "ERR 400 NOT_MONITORING %s", SID_TAG);
         }
-        // 9. QUIT Command
         else if (strcmp(buffer, "QUIT") == 0) {
             if (monitor_running) {
                 monitor_active = 0;
@@ -252,8 +280,9 @@ void *handle_client(void *client_socket) {
             }
             sprintf(response, "OK BYE %s", SID_TAG);
             send(sock, response, strlen(response), 0);
-	    printf("Controller disconnected gracefully.\n");
-            break; // Exit the loop and close the connection
+            printf("Controller disconnected gracefully.\n");
+            log_event("Client disconnected via QUIT command.");
+            break; 
         }
         else {
             sprintf(response, "ERR 404 UNKNOWN_COMMAND %s", SID_TAG);
@@ -267,7 +296,10 @@ void *handle_client(void *client_socket) {
         pthread_join(monitor_tid, NULL);
     }
 
-    if (bytes_read == 0) printf("Controller disconnected gracefully.\n");
+    if (bytes_read == 0) {
+        printf("Controller disconnected gracefully.\n");
+        log_event("Client disconnected unexpectedly.");
+    }
     else if (bytes_read < 0) perror("recv failed");
 
     close(sock);
@@ -291,6 +323,7 @@ int main() {
     if (listen(server_fd, 5) < 0) exit(EXIT_FAILURE);
 
     printf("Agent started. Listening on port %d...\n", PORT);
+    log_event("Agent started listening.");
 
     while (1) {
         if ((new_socket = accept(server_fd, (struct sockaddr *)&address, (socklen_t*)&addrlen)) < 0) continue;

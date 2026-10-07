@@ -1,0 +1,23 @@
+[Wed Oct  7 14:39:05 2026] Agent started listening.
+[Wed Oct  7 14:39:16 2026] New client connected.
+[Wed Oct  7 14:39:24 2026] Received command: AUTH OPS-2835
+[Wed Oct  7 14:39:24 2026] Authentication successful.
+[Wed Oct  7 14:39:35 2026] Received command: SYSINFO
+[Wed Oct  7 14:39:42 2026] Received command: EXEC DATE
+[Wed Oct  7 14:39:54 2026] Received command: LISTPROC
+[Wed Oct  7 14:40:02 2026] Received command: PUT test_upload.txt 22
+[Wed Oct  7 14:40:02 2026] File uploaded: test_upload.txt
+[Wed Oct  7 14:40:02 2026] Received command: d
+[Wed Oct  7 14:40:23 2026] Received command: QUIT
+[Wed Oct  7 14:40:23 2026] Client disconnected via QUIT command.
+[Wed Oct  7 14:46:19 2026] Agent started listening.
+[Wed Oct  7 14:46:26 2026] New client connected.
+[Wed Oct  7 14:46:52 2026] Received command: AUTH OPS-2835
+[Wed Oct  7 14:46:52 2026] Authentication successful.
+[Wed Oct  7 14:46:58 2026] Received command: SYSINFO
+[Wed Oct  7 14:47:05 2026] Received command: EXEC DATE
+[Wed Oct  7 14:47:13 2026] Received command: LISTPROC
+[Wed Oct  7 14:47:23 2026] Received command: PUT test_upload.txt 22
+[Wed Oct  7 14:47:23 2026] File uploaded: test_upload.txt
+[Wed Oct  7 14:47:34 2026] Received command: QUIT
+[Wed Oct  7 14:47:34 2026] Client disconnected via QUIT command.
